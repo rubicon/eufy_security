@@ -1,89 +1,110 @@
+"""Module to initialize integration"""
 import asyncio
 from datetime import timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Config, HomeAssistant
+from homeassistant.core import HomeAssistant
+from homeassistant.components.persistent_notification import create
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
-
-from .const import CAPTCHA_CONFIG, COORDINATOR, DOMAIN, PLATFORMS, CaptchaConfig
+from homeassistant.helpers.typing import ConfigType
+from .const import COORDINATOR, DOMAIN, PLATFORMS
 from .coordinator import EufySecurityDataUpdateCoordinator
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 
 
-async def async_setup(hass: HomeAssistant, config: Config):
+async def async_setup(hass: HomeAssistant, config: ConfigType):
+    """initialize the integration"""
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = {}
 
-    async def async_handle_send_message(call):
+    async def handle_send_message(call):
         coordinator: EufySecurityDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
         _LOGGER.debug(f"{DOMAIN} - send_message - call.data: {call.data}")
         message = call.data.get("message")
         _LOGGER.debug(f"{DOMAIN} - end_message - message: {message}")
-        await coordinator.async_send_message(message)
+        await coordinator.send_message(message)
 
-    async def async_force_sync(call):
+    async def handle_force_sync(call):
         coordinator: EufySecurityDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
         await coordinator.async_refresh()
 
-    async def async_driver_connect(call):
+    async def handle_log_level(call):
         coordinator: EufySecurityDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
-        await coordinator.async_driver_connect()
+        await coordinator.set_log_level(call.data.get("log_level"))
 
-    hass.services.async_register(DOMAIN, "driver_connect", async_driver_connect)
-    hass.services.async_register(DOMAIN, "force_sync", async_force_sync)
-    hass.services.async_register(DOMAIN, "send_message", async_handle_send_message)
+    hass.services.async_register(DOMAIN, "force_sync", handle_force_sync)
+    hass.services.async_register(DOMAIN, "send_message", handle_send_message)
+    hass.services.async_register(DOMAIN, "set_log_level", handle_log_level)
+
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+    """setup config entry"""
     if hass.data.get(DOMAIN) is None:
         hass.data.setdefault(DOMAIN, {})
-    captcha_config = hass.data[DOMAIN].get(CAPTCHA_CONFIG, CaptchaConfig())
-    coordinator = hass.data[DOMAIN].get(
-        COORDINATOR,
-        EufySecurityDataUpdateCoordinator(hass, config_entry, captcha_config),
+
+    coordinator = hass.data[DOMAIN][COORDINATOR] = hass.data[DOMAIN].get(
+        COORDINATOR, EufySecurityDataUpdateCoordinator(hass, config_entry)
     )
-    hass.data[DOMAIN][COORDINATOR] = coordinator
-    hass.data[DOMAIN][CAPTCHA_CONFIG] = captcha_config
 
     await coordinator.initialize()
-    await coordinator.async_refresh()
+    await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
     for platform in PLATFORMS:
-        coordinator.platforms.append(platform)
-        hass.async_add_job(
-            hass.config_entries.async_forward_entry_setup(config_entry, platform)
-        )
+        coordinator.platforms.append(platform.value)
 
     async def update(event_time_utc):
-        coordinator.async_set_updated_data(coordinator.data)
+        local_coordinator = hass.data[DOMAIN][COORDINATOR]
+        await local_coordinator.async_refresh()
 
-    coordinator.update_listener = async_track_time_interval(
-        hass, update, timedelta(seconds=1)
-    )
     config_entry.add_update_listener(async_reload_entry)
+    # async_track_time_interval(hass, update, timedelta(seconds=coordinator.config.sync_interval))
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """unload active entities"""
+    _LOGGER.debug(f"async_unload_entry 1")
     coordinator = hass.data[DOMAIN][COORDINATOR]
-    unloaded = all(
-        await asyncio.gather(
-            *[
-                hass.config_entries.async_forward_entry_unload(config_entry, platform)
-                for platform in PLATFORMS
-                if platform in coordinator.platforms
-            ]
-        )
-    )
-    coordinator.update_listener()
+    unloaded = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
+
     if unloaded:
+        await coordinator.disconnect()
         hass.data[DOMAIN] = {}
 
+    _LOGGER.debug(f"async_unload_entry 2")
     return unloaded
 
 
 async def async_reload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    """reload integration"""
+    _LOGGER.debug(f"async_reload_entry 1")
     await async_unload_entry(hass, config_entry)
+    _LOGGER.debug(f"async_reload_entry 2")
     await async_setup_entry(hass, config_entry)
+    _LOGGER.debug(f"async_reload_entry 3")
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: DeviceEntry
+) -> bool:
+    """Remove a config entry from a device."""
+    serial_no = next(iter(device_entry.identifiers))[1]
+    _LOGGER.debug(f"async_remove_config_entry_device device_entry {serial_no}")
+    coordinator = hass.data[DOMAIN][COORDINATOR]
+    if serial_no in coordinator.devices or serial_no in coordinator.stations:
+        _LOGGER.debug(f"async_remove_config_entry_device error exists {serial_no}")
+        create(
+            hass,
+            f"Device is still accessible on account, cannot be deleted!",
+            title="Eufy Security - Error",
+            notification_id="eufy_security_delete_device_error",
+        )
+        return False
+    _LOGGER.debug(f"async_remove_config_entry_device deleted {serial_no}")
+    return True

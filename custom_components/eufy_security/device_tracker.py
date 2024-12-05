@@ -1,7 +1,8 @@
 import logging
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.device_tracker import SOURCE_TYPE_GPS
+from homeassistant.components.device_tracker.config_entry import TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -32,7 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
     async_add_entities(entities)
 
 
-class EufySwitchEntity(SwitchEntity, EufySecurityEntity):
+class EufyDeviceTrackerEntity(TrackerEntity, EufySecurityEntity):
     """Base switch entity for integration"""
 
     def __init__(self, coordinator: EufySecurityDataUpdateCoordinator, metadata: Metadata) -> None:
